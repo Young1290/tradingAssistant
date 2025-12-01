@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+ccxt
+pandas
+ta
+google-generativeai
+python-dotenv
+feedparser
+requests
