@@ -30,8 +30,7 @@ app.add_middleware(
 exchange = ccxt.binance()
 
 # 初始化 Gemini
-# 請將你的 API Key 填入 .env 或直接替換下方的 os.getenv
-GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBAzZw1nX0d2V1A9CT8do2dLfw43oTlT8E")
+GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GENAI_API_KEY)
 
 # 列出可用模型（用于调试）
@@ -88,7 +87,7 @@ def get_crypto_news(symbol_query: str):
     
     return news_list
 
-def fetch_data(symbol: str, timeframe='1h', limit=100):
+def fetch_data(symbol: str, timeframe='1h', limit=1000):
     """获取 OHLCV 数据并转换为 DataFrame"""
     bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
@@ -96,38 +95,62 @@ def fetch_data(symbol: str, timeframe='1h', limit=100):
     return df
 
 def calculate_indicators(df):
-    """计算 RSI, MACD, 布林带, ATR, ADX, EMA"""
+    """计算 RSI, MACD, 布林带, ATR, ADX, EMA50, EMA200"""
     
-    # --- 基础指标 (保持不变) ---
+    # 1. RSI (相对强弱)
     df['RSI'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
     
+    # 2. MACD (动能)
     macd = ta.trend.MACD(close=df['close'])
-    df['MACD_diff'] = macd.macd_diff() # MACD 柱状图 (动能)
+    df['MACD_diff'] = macd.macd_diff()
     df['MACD'] = macd.macd()
     df['MACD_signal'] = macd.macd_signal()
     
+    # 3. 布林带 (波动通道)
     bollinger = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
     df['BBL_20_2.0'] = bollinger.bollinger_lband()
     df['BBU_20_2.0'] = bollinger.bollinger_hband()
     
+    # 4. ATR (波动率 - 用于止损)
     df['ATR'] = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
     
-    # --- 🆕 新增指标用于趋势判断 ---
-    
-    # 1. EMA (指数均线): EMA20 是短期趋势线，EMA50 是多空分界线
+    # 5. EMA (核心趋势线 - 重点新增) 
+    # EMA 20: 短线保护线
     df['EMA20'] = ta.trend.EMAIndicator(close=df['close'], window=20).ema_indicator()
+    # EMA 50: 中线生命线
     df['EMA50'] = ta.trend.EMAIndicator(close=df['close'], window=50).ema_indicator()
+    # EMA 200: 牛熊分界线 (最重要的优化)
+    df['EMA200'] = ta.trend.EMAIndicator(close=df['close'], window=200).ema_indicator()
     
-    # 2. ADX (趋势强度): 识别震荡市
-    # ADX需要 high, low, close
+    # 6. ADX (趋势强度)
     adx_indicator = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
     df['ADX'] = adx_indicator.adx()
     
-    # 支撑阻力 (保持不变)
+    # 7. 基础支撑阻力 (基于过去20根K线)
     df['Resistance_20'] = df['high'].rolling(window=20).max()
     df['Support_20'] = df['low'].rolling(window=20).min()
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
     
+# --- 新增：Pivot Points (枢轴点 - 经典算法) ---
+    # Pivot Points 通常基于"前一根K线"的 High/Low/Close 计算
+    # 这里我们计算每一根K线的 Pivot，AI 会取最后一根作为参考
+    
+    # 这里的 shift(1) 意思是取"昨天/上一周期"的数据来预测"今天/当前"的阻力
+    prev_high = df['high'].shift(1)
+    prev_low = df['low'].shift(1)
+    prev_close = df['close'].shift(1)
+    
+    # Pivot Point (中轴)
+    df['Pivot'] = (prev_high + prev_low + prev_close) / 3
+    
+    # Resistance (阻力位)
+    df['R1'] = (2 * df['Pivot']) - prev_low
+    df['R2'] = df['Pivot'] + (prev_high - prev_low)
+    
+    # Support (支撑位)
+    df['S1'] = (2 * df['Pivot']) - prev_high
+    df['S2'] = df['Pivot'] - (prev_high - prev_low)
+
     return df
 
 def get_trend_status(row):
@@ -260,9 +283,28 @@ async def analyze_market(request: AnalysisRequest):
         news_text = "\n".join([f"- {news['title']}" for news in news_list])
         fng = get_fear_and_greed()
         
+        # 获取最新的 EMA 数据
+        ema50 = last_row['EMA50']
+        # 获取 EMA20 (短期动态压力位)
+        ema20 = last_row['EMA20']
+        # 获取 EMA200 (长期动态压力位)
+        ema200 = last_row['EMA200']
+        
+        # 判断大趋势 (价格在 EMA200 之上还是之下)
+        trend_long_term = "牛市区域 (做多为主)" if last_row['close'] > ema200 else "熊市区域 (做空为主)"
+        
+        # 计算 ADX 强度
+        adx_value = last_row['ADX']
+        trend_strength = "极强" if adx_value > 35 else "强" if adx_value > 25 else "弱"
+        # 获取最新的 Pivot 数据
+        pivot = last_row['Pivot']
+        r1 = last_row['R1']
+        s1 = last_row['S1']
+        
         # --- 4. 构建增强版 Prompt（多周期 + 详细技术分析）---
         prompt = f"""
         你是一位精通**多时间周期共振 (MTF)** 和**量化技术分析**的专业交易员。
+        
         
         【资产快照】
         - 标的: {request.symbol}
@@ -283,7 +325,36 @@ async def analyze_market(request: AnalysisRequest):
         - ATR (波动率): {last_1h['ATR']:.2f}
         - 支撑位: ${last_1h['Support_20']:.2f}
         - 阻力位: ${last_1h['Resistance_20']:.2f}
+
+        ...
+        【关键支撑阻力 (Pivot Points)】
+        - 阻力位 R1: ${r1:.2f}
+        - 中轴 Pivot: ${pivot:.2f}
+        - 支撑位 S1: ${s1:.2f}
+        (如果做空，请参考 R1 或 Pivot 附近作为入场点；如果做多，参考 S1)
+        ...
         
+        【核心趋势判定 (必须遵守)】
+        - 长期趋势 (EMA200): ${ema200:.2f} -> {trend_long_term}
+        - 中期趋势 (EMA50): ${ema50:.2f}
+        
+        【分析逻辑要求】
+        1. **趋势过滤**: 如果价格在 EMA200 之下，严禁建议重仓做多，除非 RSI 极度超卖 (<25)。
+        2. **支撑阻力**: EMA50 和 EMA200 通常是极强的动态支撑/阻力位，请重点关注价格是否在此处企稳。
+        ...
+        
+        ...
+        【趋势强度分析 (ADX)】
+        - ADX值: {adx_value:.1f} ({trend_strength}趋势)
+        - 短期均线压力 (EMA20): ${ema20:.2f}
+        
+        【入场策略调整逻辑 (重要)】
+        1. **稳健模式 (ADX < 25)**: 市场震荡，必须等待价格反弹至 Pivot(${pivot:.2f}) 或 R1(${r1:.2f}) 附近才能做空，拒绝现价追单。
+        2. **激进模式 (ADX > 30)**: 市场处于极强单边趋势，价格很难反弹到 Pivot。
+           - **做空入场点**: 请参考 **EMA20 (${ema20:.2f})** 作为第一入场位。
+           - 甚至可以考虑 **Breakout (跌破支撑)** 追空策略。
+        ...
+
         【市场宏观情绪】
         - 恐惧贪婪指数: {fng['value']}/100 ({fng['value_classification']})
         - 解读: {"极度恐慌往往是抄底机会" if int(fng['value']) < 25 else "极度贪婪需警惕回调" if int(fng['value']) > 75 else "情绪中性"}
