@@ -17,7 +17,7 @@ git push -u origin main
 2. New + → Web Service
 3. Connect GitHub repo
 4. 配置:
-   - Root Directory: `tradingAssistant/backend`
+   - Root Directory: `backend`
    - Runtime: Docker
 5. 环境变量:
    ```
@@ -36,7 +36,7 @@ git push -u origin main
 ### 3. 部署 Frontend 到 Vercel
 1. 访问 https://vercel.com
 2. Import GitHub repo
-3. Root Directory: `tradingAssistant/frontend`
+3. Root Directory: `frontend`
 4. 环境变量:
    ```
    VITE_API_URL=https://your-backend.onrender.com

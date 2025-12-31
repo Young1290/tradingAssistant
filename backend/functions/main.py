@@ -217,18 +217,15 @@ async def analyze_market(request: AnalysisRequest):
         last_daily = df_daily.iloc[-1]
         last_hourly = df_hourly.iloc[-1]
         
-        # 3. 宏观背景判定 (🔥 V6++策略核心逻辑)
+        # 3. 宏观背景判定 (🔥 严格风控核心逻辑)
         slope = last_daily['SMA200_Slope']
         dev = last_daily['SMA200_Dev']
         price = last_daily['close']
         sma200 = last_daily['SMA200']
         
-        # 🔥 V6++逻辑: 宽松牛市判定 (价格>SMA200 OR 斜率>0)
-        # 优势: 减少误判，避免震荡市频繁止损，5年回测+514% vs V7的-18%
-        is_bull_regime = (price > sma200) or (slope > 0)
-        
-        # 做空条件判定 (V6++新增)
-        can_short = (not is_bull_regime) and (dev < -10) and (slope < -0.5)
+        # ❌ 旧逻辑: is_bull_regime = (price > sma200) or (slope > 0)
+        # ✅ 当前逻辑: 只有价格站在 SMA200 之上才算牛市，跌破即熊市
+        is_bull_regime = price > sma200
         
         regime_desc = "🐮 牛市/强势背景" if is_bull_regime else "🐻 熊市/弱势背景"
 
@@ -268,16 +265,13 @@ async def analyze_market(request: AnalysisRequest):
             
         macd_status = "✅ 金叉" if last_hourly['MACD'] > last_hourly['MACD_signal'] else "⚠️ 死叉"
         
-        # 6. Prompt (🔥 V6++策略版 - 历史回测+514%收益)
+        # 6. Prompt (🔥 严格风控版)
         news_list = get_crypto_news(request.symbol)
         news_text = "\n".join([f"- {n['title']}" for n in news_list])
         fng = get_fear_and_greed()
-        
-        # 预计算做空状态（避免f-string嵌套）
-        short_status = "✅可做空" if can_short else "❌不可做空"
 
         prompt = f"""
-        你是一位采用**V6++策略**的趋势交易员。
+        你是一位**严格风控**的趋势交易员。
         
         【宏观背景 (日线)】
         - 环境: **{regime_desc}**
@@ -291,36 +285,31 @@ async def analyze_market(request: AnalysisRequest):
         - Pivot: ${last_hourly['Pivot']:.2f}
         - MACD: {macd_status}
         
+        【🔥 核心决策逻辑 (严格执行) 🔥】
         
-        【🔥 V6++核心决策逻辑 (历史回测+514%收益) 🔥】
-        
-        **V6++牛市判定**: 价格>SMA200 OR 斜率>0 (宽松判定，避免误判)
-        
-        **场景 A: 牛市背景**
-        *逻辑: 持有为主，回调买入，盈利100%获利了结。*
-        1. **🎯 100%获利了结**: 如果持仓盈利 >= 100% -> **立即卖出锁定利润** (避免顶点回撤)。
-        2. **悬崖勒马**: 乖离率 < 3% 且 斜率 < 0 (均线拐头) -> **减仓/观望**。
-        3. **牛市回调**: 价格 > SMA200 且 RSI < 50 -> **买入/加仓**。
-        4. **趋势跟随**: 价格稳在 SMA200 之上或斜率向上 -> **持有**。
+        **场景 A: 牛市背景 (价格 > SMA200)**
+        *逻辑: 持有为主，回调买入，但在悬崖边要小心。*
+        1. **悬崖勒马**: 虽然价格 > SMA200，但如果 **乖离率 < 3%** 且 **斜率 < 0** (均线开始拐头)，说明趋势可能终结 -> **减仓/观望**。
+        2. **牛市回调 (黄金坑)**: 价格 > SMA200 且 RSI < 50 -> **买入/加仓**。
+        3. **趋势跟随**: 只要价格稳在 SMA200 之上 -> **持有**。
 
-        **场景 B: 熊市背景 (价格<SMA200 且 斜率<0)**
-        *逻辑: 可做空赚钱，不要轻易抄底。*
-        1. **止损/空仓**: 价格 < SMA200 -> **卖出/观望**。
-        2. **📉 做空机会 (当前{short_status})**: 
-           - 条件: 乖离率 < -10% 且 斜率 < -0.5% -> **可考虑做空**
-           - 平空: 盈利100% 或 乖离率>-5% 或 转牛
-        3. **极端超跌**: 乖离率 < -30% -> 可轻仓博反弹。
+        **场景 B: 熊市背景 (价格 < SMA200)**
+        *逻辑: 只要在水下，默认空仓/做空。不要轻易抄底。*
+        1. **止损/空仓 (Bear Defense)**: 只要 价格 < SMA200 -> **卖出/观望**。
+           - *理由: 宁可错过反弹，也不要接飞刀。2022年的教训。*
+        2. **熊市诱多**: 价格反弹测试 SMA200 但未站稳 -> **做空**。
+        3. **极端超跌 (唯一买点)**: 只有 **乖离率 < -30%** (极度恐慌) 时，才可轻仓博反弹。
 
         【任务】
         请给出未来 **14-30天** 的操作建议。
         
         请输出纯 JSON:
         {{
-            "direction": "买入" | "持有" | "卖出" | "观望" | "做空",
-            "entry_price": "建议挂单价",
+            "direction": "买入" | "持有" | "卖出" | "观望",
+            "entry_price": "建议挂单价 (参考日线SMA50 或 小时线S1)",
             "stop_loss": "建议止损价 (参考 SMA200)",
-            "target_price": "建议止盈价 (多头考虑100%获利)",
-            "reasoning": "详细理由 (必须基于V6++逻辑)",
+            "target_price": "建议止盈价",
+            "reasoning": "详细理由 (必须基于严格风控逻辑，特别是SMA200的位置)",
             "confidence": "1-10",
             "risk_warning": "风险提示"
         }}
@@ -332,18 +321,11 @@ async def analyze_market(request: AnalysisRequest):
             cleaned_text = re.sub(r'```json\s*', '', response.text).replace('```', '').strip()
             analysis_json = json.loads(cleaned_text)
             
-            
             return {
                 "ui_signals": ui_signals,
                 "analysis": analysis_json,
                 "news": news_list,
-                "fng": fng,
-                "v6pp_info": {
-                    "is_bull_v6": bool(is_bull_regime),
-                    "can_short": bool(can_short),
-                    "strategy_version": "V6++",
-                    "backtest_performance": "+514% (2021-2025)"
-                }
+                "fng": fng
             }
         except json.JSONDecodeError:
             return {
@@ -357,202 +339,21 @@ async def analyze_market(request: AnalysisRequest):
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 🔥 情景分析 API (新增) ---
+# ==========================================
+# 🔥 Firebase Cloud Functions 适配器 (加在文件最末尾)
+# ==========================================
+from firebase_functions import https_fn
+from firebase_admin import initialize_app
 
-from scenario_scoring import ScenarioScorer
+# 初始化 Firebase
+initialize_app()
 
-@app.post("/api/scenario-analysis")
-async def scenario_analysis(request: AnalysisRequest):
+@https_fn.on_request(region="us-central1", memory=512, timeout_sec=60)
+def api(req: https_fn.Request) -> https_fn.Response:
     """
-    宏观情景分析 - 自动获取数据并计算四大情景概率
+    这是一个适配器，把 Firebase 的 HTTP 请求转发给 FastAPI 处理。
+    注意：这是简化的同步转发，生产环境通常建议用 Google Cloud Run，
+    但在 Firebase Functions 里这样写能跑通基本的 API。
     """
-    try:
-        # 1. 自动获取宏观数据
-        print(f"📊 开始获取 {request.symbol} 的宏观数据...")
-        
-        # 1.1 美元指数（简化 - 使用固定值或外部API）
-        dxy_value = "98.5 (估算)"
-        dxy_trend = "走弱"
-        
-        # 1.2 Fed 利率政策（通过AI分析新闻）
-        try:
-            rss_url = "https://news.google.com/rss/search?q=Federal+Reserve+interest+rate&hl=en-US&gl=US&ceid=US:en"
-            feed = feedparser.parse(rss_url)
-            news_titles = [entry.title for entry in feed.entries[:5]]
-            news_text = "\n".join([f"- {title}" for title in news_titles])
-            
-            prompt = f"""根据以下最新新闻，用一句话总结当前 Fed 利率政策状态：
-{news_text}
-请用简短格式回答，例如: "降息 25bp" 或 "维持利率不变" 或 "加息 50bp"
-"""
-            response = model.generate_content(prompt)
-            fed_policy = response.text.strip()
-        except:
-            fed_policy = "维持现状"
-        
-        # 1.3 BTC ETF 净流入 (来自 Farside Investors 真实数据)
-        try:
-            from btc_etf_flow_helper import get_btc_etf_flow_summary
-            etf_flow = get_btc_etf_flow_summary()
-            print(f"✓ 获取到 BTC ETF 真实数据: {etf_flow}")
-        except Exception as e:
-            print(f"⚠️ BTC ETF 数据获取失败，使用备用方案: {e}")
-            # 备用方案：使用AI分析新闻
-            try:
-                rss_url = "https://news.google.com/rss/search?q=Bitcoin+ETF+flow&hl=en-US&gl=US&ceid=US:en"
-                feed = feedparser.parse(rss_url)
-                news_titles = [entry.title for entry in feed.entries[:5]]
-                news_text = "\n".join([f"- {title}" for title in news_titles])
-                
-                prompt = f"""根据以下新闻，总结最近的 BTC ETF 资金流动情况：
-{news_text}
-请用简短格式回答，例如: "单周流入 $1.2B" 或 "单月流出 $3B" 或 "每日小幅波动"
-"""
-                response = model.generate_content(prompt)
-                etf_flow = response.text.strip()
-            except:
-                etf_flow = "数据不明确"
-        
-        # 1.4 长期持有者行为 (来自 CryptoQuant 链上真实数据)
-        try:
-            from holder_behavior_helper import get_holder_behavior_summary as get_holder_summary
-            holder_behavior = get_holder_summary()
-            print(f"✓ 获取到持有者行为链上数据: {holder_behavior}")
-        except Exception as e:
-            print(f"⚠️ 持有者行为数据获取失败，使用备用方案: {e}")
-            # 备用方案已在 holder_behavior_helper.py 中实现
-            holder_behavior = "数据不可用"
-        
-        # 1.5 挖矿成本
-        mining_cost = "$94,000"
-        
-        # 1.6 美股 S&P500 表现
-        try:
-            rss_url = "https://news.google.com/rss/search?q=S%26P+500+stock+market&hl=en-US&gl=US&ceid=US:en"
-            feed = feedparser.parse(rss_url)
-            news_titles = [entry.title for entry in feed.entries[:5]]
-            news_text = "\n".join([f"- {title}" for title in news_titles])
-            
-            prompt = f"""根据以下美股新闻，判断 S&P500 近期表现：
-{news_text}
-请用简短格式回答，例如: "创历史新高" 或 "出现 5% 回撤" 或 "走平震荡"
-"""
-            response = model.generate_content(prompt)
-            sp500_performance = response.text.strip()
-        except:
-            sp500_performance = "数据不可用"
-        
-        # 1.7 风险事件
-        try:
-            rss_url = "https://news.google.com/rss/search?q=cryptocurrency+crisis+OR+exchange+collapse+OR+regulation&hl=en-US&gl=US&ceid=US:en"
-            feed = feedparser.parse(rss_url)
-            news_titles = [entry.title for entry in feed.entries[:5]]
-            news_text = "\n".join([f"- {title}" for title in news_titles])
-            
-            prompt = f"""根据以下新闻，判断是否存在重大风险事件或黑天鹅：
-{news_text}
-请用简短格式回答，例如: "无明显风险" 或 "某交易所爆雷" 或 "监管收紧"
-"""
-            response = model.generate_content(prompt)
-            risk_events = response.text.strip()
-        except:
-            risk_events = "未检测到"
-        
-        # 2. 汇总宏观数据
-        macro_data = {
-            "美元指数 (DXY)": f"{dxy_value}, {dxy_trend}",
-            "Fed 利率政策": fed_policy,
-            "BTC ETF 净流入": etf_flow,
-            "长期持有者行为": holder_behavior,
-            "挖矿生产成本": mining_cost,
-            "美股表现 (S&P500)": sp500_performance,
-            "风险事件": risk_events
-        }
-        
-        # 3. 使用规则评分系统计算概率
-        scorer = ScenarioScorer()
-        probabilities = scorer.calculate_scenario_scores(macro_data)
-        most_likely = scorer.get_most_likely_scenario(probabilities)
-        
-        # 4. 用 AI 生成详细分析和操作建议
-        scenario_names = {
-            "scenario_1": "情景 1: V型反转",
-            "scenario_2": "情景 2: 高位横盘",
-            "scenario_3": "情景 3: 缓慢熊市",
-            "scenario_4": "情景 4: 深度熊市"
-        }
-        
-        # 构建概率摘要
-        prob_summary = "\n".join([
-            f"- {scenario_names[k]}: {v['probability']}%"
-            for k, v in probabilities.items()
-        ])
-        
-        analysis_prompt = f"""
-你是一位专业的加密货币宏观分析师。
-
-【当前宏观数据】
-{json.dumps(macro_data, ensure_ascii=False, indent=2)}
-
-【规则评分系统计算的概率】
-{prob_summary}
-
-【最可能情景】
-{most_likely['name']} ({most_likely['probability']}%)
-
-请基于以上数据和概率分析，生成详细的操作建议。
-
-请以 JSON 格式输出：
-{{
-  "价格目标预期": "$XX,XXX - $XX,XXX",
-  "操作建议": {{
-    "仓位管理": "具体建议（考虑最可能情景）",
-    "止损位": "$XX,XXX",
-    "止盈位": "$XX,XXX 或 分批止盈策略"
-  }},
-  "综合分析": "详细说明当前市场状态，为什么各情景有相应概率，重点分析最可能的情景",
-  "风险提示": "针对当前情景的风险警告"
-}}
-"""
-        
-        try:
-            ai_response = model.generate_content(analysis_prompt)
-            cleaned_text = re.sub(r'```json\s*', '', ai_response.text).replace('```', '').strip()
-            ai_analysis = json.loads(cleaned_text)
-        except:
-            ai_analysis = {
-                "价格目标预期": "数据不足",
-                "操作建议": {
-                    "仓位管理": "建议观望",
-                    "止损位": "待定",
-                    "止盈位": "待定"
-                },
-                "综合分析": "AI分析生成失败，请参考概率数据",
-                "风险提示": "数据不完整，谨慎操作"
-            }
-        
-        # 5. 组装返回结果
-        return {
-            "macro_data": macro_data,
-            "scenario_probabilities": {
-                scenario_names[k]: {
-                    "probability": f"{v['probability']}%",
-                    "raw_score": f"{v['raw_score']}/100",
-                    "matched_factors": v['details']['matched'],
-                    "unmatched_factors": v['details']['unmatched']
-                }
-                for k, v in probabilities.items()
-            },
-            "most_likely_scenario": {
-                "name": most_likely['name'],
-                "probability": f"{most_likely['probability']}%"
-            },
-            "ai_analysis": ai_analysis,
-            "calculation_method": "rule_based_scoring_plus_ai"
-        }
-        
-    except Exception as e:
-        print(f"Scenario Analysis Error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    with app.request_context(req.environ):
+        return app.full_dispatch_request()
