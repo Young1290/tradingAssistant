@@ -8,7 +8,7 @@ cd /Users/user/tradingAssistant
 git init
 git add .
 git commit -m "Initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/tradingAssistant.git
+git remote add origin https://github.com/Young1290/tradingAssistant.git
 git push -u origin main
 ```
 
