@@ -432,20 +432,13 @@ async def scenario_analysis(request: AnalysisRequest):
             print(f"⚠️ 矿机成本数据获取失败，使用备用值: {e}")
             mining_cost = "约$75,000 (参考值)"
         
-        # 1.6 美股 S&P500 表现
+        # 1.6 美股 S&P500 表现 (从 Yahoo Finance 获取真实数据)
         try:
-            rss_url = "https://news.google.com/rss/search?q=S%26P+500+stock+market&hl=en-US&gl=US&ceid=US:en"
-            feed = feedparser.parse(rss_url)
-            news_titles = [entry.title for entry in feed.entries[:5]]
-            news_text = "\n".join([f"- {title}" for title in news_titles])
-            
-            prompt = f"""根据以下美股新闻，判断 S&P500 近期表现：
-{news_text}
-请用简短格式回答，例如: "创历史新高" 或 "出现 5% 回撤" 或 "走平震荡"
-"""
-            response = model.generate_content(prompt)
-            sp500_performance = response.text.strip()
-        except:
+            from sp500_helper import get_sp500_performance
+            sp500_performance = get_sp500_performance()
+            print(f"✓ 获取到 S&P500 真实数据: {sp500_performance}")
+        except Exception as e:
+            print(f"⚠️ S&P500 数据获取失败: {e}")
             sp500_performance = "数据不可用"
         
         # 1.7 风险事件
