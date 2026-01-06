@@ -1,4 +1,6 @@
 {
+    "buildCommand": "cd frontend && npm install && npm run build",
+    "installCommand": "cd frontend && npm install",
     "rewrites": [
         {
             "source": "/api/:path*",
