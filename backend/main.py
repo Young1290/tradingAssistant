@@ -423,8 +423,14 @@ async def scenario_analysis(request: AnalysisRequest):
             # 备用方案已在 holder_behavior_helper.py 中实现
             holder_behavior = "数据不可用"
         
-        # 1.5 挖矿成本
-        mining_cost = "$94,000"
+        # 1.5 挖矿成本 (来自 Bitdeer 矿机关机价数据)
+        try:
+            from mining_shutdown_price import get_mining_cost_summary
+            mining_cost = get_mining_cost_summary()
+            print(f"✓ 获取到矿机关机价数据: {mining_cost}")
+        except Exception as e:
+            print(f"⚠️ 矿机成本数据获取失败，使用备用值: {e}")
+            mining_cost = "约$75,000 (参考值)"
         
         # 1.6 美股 S&P500 表现
         try:
